@@ -1,3 +1,4 @@
+# Modified on 2026-11-25 to exclude local Wrangler secrets.
 # Demo 目录
 demo/
 tmp/
@@ -28,6 +29,8 @@ wrangler-install.log
 .DS_Store
 
 # 环境配置
+.dev.vars
+.dev.vars.*
 .env
 .env.local
 .env.*.local

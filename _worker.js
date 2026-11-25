@@ -1,8 +1,15 @@
-﻿const Version = '2026-11-10 23:26:46';
-let config_JSON, 缓存SOCKS5白名单 = null, 调试日志打印 = false;
+﻿/*
+ * edgetunnel-plus, derived from cmliu/edgetunnel.
+ * Modified on 2026-11-25 to add multi-user access, expiry enforcement,
+ * and redesigned administrator screens.
+ * Distributed under GNU General Public License version 2. See LICENSE.
+ */
+const Version = '2026-11-10 23:26:46';
+let 缓存SOCKS5白名单 = null, 调试日志打印 = false;
 let SOCKS5白名单 = ['*tapecontent.net', '*cloudatacdn.com', '*loadshare.org', '*cdn-centaurus.com', 'scholar.google.com'];
 const Pages静态页面 = 'https://edt-pages.github.io', EDT_版本号 = Number(String(Version).replace(/\D+/g, ''));
 ///////////////////////////////////////////////////////全局常量和工具函数///////////////////////////////////////////////
+const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const WS早期数据最大字节 = 8 * 1024, WS早期数据最大头长度 = Math.ceil(WS早期数据最大字节 * 4 / 3) + 4;
 const 上行合包目标字节 = 20 * 1024, 上行队列最大字节 = 16 * 1024 * 1024, 上行队列最大条目 = 4096;
 const 下行Grain包字节 = 32 * 1024, 下行Grain尾部阈值 = 512, 下行Grain低水位字节 = Math.max(4096, 下行Grain尾部阈值 * 12), 下行Grain最大等待轮次 = 4;
@@ -30,25 +37,42 @@ export default {
 		const 管理员密码 = env.ADMIN || env.admin || env.PASSWORD || env.password || env.pswd || env.TOKEN || env.KEY || env.UUID || env.uuid;
 		const 加密秘钥 = env.KEY || '勿动此默认密钥，有需求请自行通过添加变量KEY进行修改';
 		const userIDMD5 = await MD5MD5(管理员密码 + 加密秘钥);
-		const uuidRegex = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/;
 		const envUUID = env.UUID || env.uuid;
 		const userID = (envUUID && uuidRegex.test(envUUID)) ? envUUID.toLowerCase() : [userIDMD5.slice(0, 8), userIDMD5.slice(8, 12), '4' + userIDMD5.slice(13, 16), '8' + userIDMD5.slice(17, 20), userIDMD5.slice(20)].join('-');
 		const hosts = env.HOST ? (await 整理成数组(env.HOST)).map(h => h.toLowerCase().replace(/^https?:\/\//, '').split('/')[0].split(':')[0]) : [url.hostname];
 		const host = hosts[0];
 		const 访问路径 = url.pathname.slice(1).toLowerCase();
+		const 订阅用户ID = 访问路径.startsWith('sub/') ? 访问路径.slice(4) : null;
+		const 节点用户ID = /^\/u-([0-9a-f-]+)(?:\/|$)/i.exec(url.pathname)?.[1]?.toLowerCase();
+		const 是WS = upgradeHeader === 'websocket';
+		const 是POST代理 = request.method === 'POST' && 访问路径 !== 'login' && 访问路径 !== 'admin' && !访问路径.startsWith('admin/') && 订阅用户ID === null;
+		const 用户ID = 订阅用户ID ?? ((是WS || 是POST代理) ? 节点用户ID : null);
+		let 订阅用户 = null;
+		if (用户ID != null) {
+			if (!管理员密码 || !env.USERS_DB || !uuidRegex.test(用户ID)) return 用户错误(404);
+			if (订阅用户ID !== null && request.method !== 'GET') return 用户错误(405);
+			try {
+				订阅用户 = await 读取订阅用户(env.USERS_DB, 用户ID);
+			} catch (error) {
+				console.error('读取用户数据库失败', error.message);
+				return 用户错误(503);
+			}
+			if (!订阅用户 || !订阅用户.enabled || 订阅用户.expires_at <= Date.now()) return 用户错误(404);
+		}
 		调试日志打印 = ['1', 'true'].includes(env.DEBUG) || 调试日志打印;
 		预加载竞速拨号 = ['1', 'true'].includes(env.PRELOAD_RACE_DIAL) || 预加载竞速拨号;
 		反代并发拨号数 = Math.max(1, Number(env.PROXY_CONCURRENT_DIAL) || 反代并发拨号数);
 		TCP并发拨号数 = Math.max(1, Number(env.TCP_CONCURRENT_DIAL) || TCP并发拨号数);
 		if (!env.TCP_CONCURRENT_DIAL && TCP并发拨号数 !== 1 && 识别运营商(request) === 'cmcc') TCP并发拨号数 = 1;
-		let 默认反代IP = (`${request.cf.colo}.${特征码字典[0]}.${特征码字典[1]}SsSs.nEt`).toLowerCase(), 默认反代兜底 = true;
+		let 默认反代IP = (`${request.cf?.colo || "unknown"}.${特征码字典[0]}.${特征码字典[1]}SsSs.nEt`).toLowerCase(), 默认反代兜底 = true;
 		if (env.PROXYIP) {
 			const proxyIPs = await 整理成数组(env.PROXYIP);
 			默认反代IP = proxyIPs[Math.floor(Math.random() * proxyIPs.length)];
 			默认反代兜底 = false;
 		};
 		const 访问IP = request.headers.get('CF-Connecting-IP') || request.headers.get('True-Client-IP') || request.headers.get('X-Real-IP') || request.headers.get('X-Forwarded-For') || request.headers.get('Fly-Client-IP') || request.headers.get('X-Appengine-Remote-Addr') || request.headers.get('X-Cluster-Client-IP') || '未知IP';
-		const [本机标识头, 本机标识键] = 获取本机标识(userID);
+		const 凭据UUID = 订阅用户?.node_uuid ?? userID;
+		const [本机标识头, 本机标识键] = 获取本机标识(凭据UUID);
 		if (缓存SOCKS5白名单 === null) {
 			if (env.GO2SOCKS5) SOCKS5白名单 = [...new Set(SOCKS5白名单.concat(await 整理成数组(env.GO2SOCKS5)))];
 			缓存SOCKS5白名单 = SOCKS5白名单;
@@ -66,25 +90,28 @@ export default {
 				}
 				if (请求前8总和 === 目标前8总和 && 请求UUID.slice(-12) === 目标UUID.slice(-12)) return new Response(JSON.stringify({ Version: EDT_版本号 }), { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
 			}
-		} else if (管理员密码 && upgradeHeader === 'websocket') {// WebSocket代理
-			const 反代上下文 = await 反代参数获取(url, userID, 默认反代IP, 默认反代兜底);
-			log(`[WebSocket] 命中请求: ${url.pathname}${url.search}`);
-			return await 处理WS请求(request, userID, url, 反代上下文);
-		} else if (管理员密码 && !访问路径.startsWith('admin/') && 访问路径 !== 'login' && request.method === 'POST') {// gRPC/叉HTTP代理
-			const 反代上下文 = await 反代参数获取(url, userID, 默认反代IP, 默认反代兜底);
+		} else if (管理员密码 && 订阅用户ID === null && (是WS || 是POST代理)) {
+			const 代理URL = new URL(url);
+			if (订阅用户) 代理URL.pathname = url.pathname.slice(3 + 用户ID.length) || '/';
+			const 反代上下文 = await 反代参数获取(代理URL, 凭据UUID, 默认反代IP, 默认反代兜底);
+			if (是WS) {
+				log(`[WebSocket] 命中请求: ${url.pathname}${url.search}`);
+				return await 处理WS请求(request, 凭据UUID, url, 反代上下文);
+			}
 			const 命中叉HTTP特征 = !!request.headers.get(本机标识头) || !!url.searchParams.get(本机标识键);
 			if (!命中叉HTTP特征 && contentType.startsWith('application/grpc')) {
 				log(`[gRPC] 命中请求: ${url.pathname}${url.search}`);
-				return await 处理gRPC请求(request, userID, 反代上下文);
+				return await 处理gRPC请求(request, 凭据UUID, 反代上下文);
 			}
 			log(`[叉HTTP] 命中请求: ${url.pathname}${url.search}`);
-			return await 处理叉HTTP请求(request, userID, 反代上下文);
+			return await 处理叉HTTP请求(request, 凭据UUID, 反代上下文);
 		} else {
 			if (url.protocol === 'http:') return Response.redirect(url.href.replace(`http://${url.hostname}`, `https://${url.hostname}`), 301);
 			if (!管理员密码) return fetch(Pages静态页面 + '/noADMIN').then(r => { const headers = new Headers(r.headers); headers.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate'); headers.set('Pragma', 'no-cache'); headers.set('Expires', '0'); return new Response(r.body, { status: 404, statusText: r.statusText, headers }) });
 			if (env.KV && typeof env.KV.get === 'function') {
 				const 区分大小写访问路径 = url.pathname.slice(1);
-				if (区分大小写访问路径 === 加密秘钥 && 加密秘钥 !== '勿动此默认密钥，有需求请自行通过添加变量KEY进行修改') {//快速订阅
+				const 用户管理接口 = 访问路径 === 'admin/users/api' || 访问路径.startsWith('admin/users/api/');
+				if (订阅用户ID === null && 访问路径 !== 'admin/users' && !用户管理接口 && 区分大小写访问路径 === 加密秘钥 && 加密秘钥 !== '勿动此默认密钥，有需求请自行通过添加变量KEY进行修改') {//快速订阅
 					const params = new URLSearchParams(url.search);
 					params.set('token', await MD5MD5(host + userID));
 					return new Response('重定向中...', { status: 302, headers: { 'Location': `/sub?${params.toString()}` } });
@@ -103,12 +130,21 @@ export default {
 							return 响应;
 						}
 					}
-					return fetch(Pages静态页面 + '/login');
+					return 管理登录页面(request.method === 'POST');
 				} else if (访问路径 === 'admin' || 访问路径.startsWith('admin/')) {//验证cookie后响应管理页面
 					const cookies = request.headers.get('Cookie') || '';
 					const authCookie = cookies.split(';').find(c => c.trim().startsWith('auth='))?.split('=')[1];
 					// 没有cookie或cookie错误，跳转到/login页面
-					if (!authCookie || authCookie !== await MD5MD5(UA + 加密秘钥 + 管理员密码)) return new Response('重定向中...', { status: 302, headers: { 'Location': '/login' } });
+					if (!authCookie || authCookie !== await MD5MD5(UA + 加密秘钥 + 管理员密码)) {
+						return 用户管理接口 ? 用户错误(401, '请先登录后台。') : new Response('重定向中...', { status: 302, headers: { 'Location': '/login' } });
+					}
+					if (访问路径 === 'admin/users') return 用户管理页面(request.method);
+					if (用户管理接口) {
+						if (!env.ADMIN?.trim() || env.ADMIN.trim().toLowerCase() === userID) {
+							return 用户错误(503, '请设置独立于节点 UUID 的 ADMIN 后台密码。');
+						}
+						return 管理订阅用户(request, url, env.USERS_DB, 访问路径);
+					}
 					if (访问路径 === 'admin/log.json') {// 读取日志内容
 						const 读取日志内容 = await env.KV.get('log.json') || '[]';
 						return new Response(读取日志内容, { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
@@ -205,7 +241,7 @@ export default {
 						return new Response(JSON.stringify(检测代理响应, null, 2), { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
 					}
 
-					config_JSON = await 读取config_JSON(env, host, userID, UA);
+					let config_JSON = await 读取config_JSON(env, host, userID, UA);
 
 					if (访问路径 === 'admin/init') {// 重置配置为默认值
 						try {
@@ -296,25 +332,29 @@ export default {
 					}
 
 					ctx.waitUntil(请求日志记录(env, request, 访问IP, 'Admin_Login', config_JSON));
-					return fetch(Pages静态页面 + '/admin' + url.search);
+					if (访问路径 === 'admin/tools') return fetch(Pages静态页面 + '/admin' + url.search);
+					if (访问路径 !== 'admin' && 访问路径 !== 'admin/') return 用户错误(404, '后台页面不存在。');
+					return 管理控制台(url.searchParams.get('view'));
 				} else if (访问路径 === 'logout' || uuidRegex.test(访问路径)) {//清除cookie并跳转到登录页面
 					const 响应 = new Response('重定向中...', { status: 302, headers: { 'Location': '/login' } });
 					响应.headers.set('Set-Cookie', 'auth=; Path=/; Max-Age=0; HttpOnly');
 					return 响应;
-				} else if (访问路径 === 'sub') {//处理订阅请求
-					const 订阅TOKEN = await MD5MD5(host + userID), 作为优选订阅生成器 = ['1', 'true'].includes(env.BEST_SUB) && url.searchParams.get('host') === 'example.com' && url.searchParams.get('uuid') === '00000000-0000-4000-8000-000000000000' && UA.toLowerCase().includes('tunnel (https://github.com/' + 特征码字典[1] + '/edge');
+				} else if (访问路径 === 'sub' || 订阅用户) {//处理订阅请求
+					const 订阅路径 = 订阅用户 ? '/sub/' + 用户ID : '/sub';
+					const 订阅TOKEN = 订阅用户?.sub_token ?? await MD5MD5(host + userID), 作为优选订阅生成器 = !订阅用户 && ['1', 'true'].includes(env.BEST_SUB) && url.searchParams.get('host') === 'example.com' && url.searchParams.get('uuid') === '00000000-0000-4000-8000-000000000000' && UA.toLowerCase().includes('tunnel (https://github.com/' + 特征码字典[1] + '/edge');
 					const 请求TOKEN = url.searchParams.get('token');
 					const 用户客户端请求订阅 = 请求TOKEN === 订阅TOKEN;
 					const 当前日序号 = Math.floor(Date.now() / 86400000);
-					const 订阅转换后端TOKEN种子 = base64SecretEncode(订阅TOKEN, userID);
+					const 订阅转换后端TOKEN种子 = base64SecretEncode(订阅TOKEN, 凭据UUID);
 					const [今日订阅转换后端专属TOKEN, 昨日订阅转换后端专属TOKEN] = await Promise.all([
 						MD5MD5(订阅转换后端TOKEN种子 + 当前日序号),
 						MD5MD5(订阅转换后端TOKEN种子 + (当前日序号 - 1)),
 					]);
 					const 订阅转换后端请求订阅 = 请求TOKEN === 今日订阅转换后端专属TOKEN || 请求TOKEN === 昨日订阅转换后端专属TOKEN;
 					if (用户客户端请求订阅 || 订阅转换后端请求订阅 || 作为优选订阅生成器) {
-						config_JSON = await 读取config_JSON(env, host, userID, UA);
-						if (作为优选订阅生成器) ctx.waitUntil(请求日志记录(env, request, 访问IP, 'Get_Best_SUB', config_JSON, false));
+						const config_JSON = await 读取config_JSON(env, host, 凭据UUID, UA, false, userID);
+						if (订阅用户) config_JSON.订阅用户ID = 用户ID;
+						else if (作为优选订阅生成器) ctx.waitUntil(请求日志记录(env, request, 访问IP, 'Get_Best_SUB', config_JSON, false));
 						else ctx.waitUntil(请求日志记录(env, request, 访问IP, 'Get_SUB', config_JSON));
 						const ua = UA.toLowerCase();
 						const responseHeaders = {
@@ -323,7 +363,9 @@ export default {
 							"Profile-web-page-url": url.protocol + '//' + url.host + '/admin',
 							"Cache-Control": "no-store",
 						};
-						if (config_JSON.CF.Usage.success) {
+						if (订阅用户) {
+							responseHeaders["Subscription-Userinfo"] = `expire=${Math.floor(订阅用户.expires_at / 1000)}`;
+						} else if (config_JSON.CF.Usage.success) {
 							const pagesSum = config_JSON.CF.Usage.pages;
 							const workersSum = config_JSON.CF.Usage.workers;
 							const total = Number.isFinite(config_JSON.CF.Usage.max) ? (config_JSON.CF.Usage.max / 1000) * 1024 : 1024 * 100;
@@ -346,6 +388,10 @@ export default {
 													? 'loon'
 													: 'mixed';
 
+						if (订阅用户 && !['mixed', 'clash', 'singbox', 'surge', 'surge&ver=4', 'quanx', 'loon'].includes(订阅类型)) {
+							return 用户错误(400, '不支持此订阅格式。');
+						}
+						if (订阅用户 && !用户客户端请求订阅 && 订阅类型 !== 'mixed') return 用户错误(404);
 						if (!ua.includes('mozilla')) responseHeaders["Content-Disposition"] = `attachment; filename*=utf-8''${encodeURIComponent(config_JSON.优选订阅生成.SUBNAME)}`;
 						const 协议类型 = ((url.searchParams.has('surge') || ua.includes('surge')) && config_JSON.协议类型 !== 'ss') ? 'tro' + 'jan' : config_JSON.协议类型;
 						let 订阅内容 = '';
@@ -353,7 +399,7 @@ export default {
 							const TLS分片参数 = config_JSON.TLS分片 == 'Shadowrocket' ? `&fragment=${encodeURIComponent('1,40-60,30-50,tlshello')}` : config_JSON.TLS分片 == 'Happ' ? `&fragment=${encodeURIComponent('3,1,tlshello')}` : '';
 							let 完整优选IP = [], 其他节点LINK = '', 反代IP池 = [];
 
-							if (!url.searchParams.has('sub') && config_JSON.优选订阅生成.local) { // 本地生成订阅
+							if ((订阅用户 || !url.searchParams.has('sub')) && config_JSON.优选订阅生成.local) { // 本地生成订阅
 								const 完整优选列表 = config_JSON.优选订阅生成.本地IP库.随机IP ? (
 									await 生成随机IP(request, config_JSON.优选订阅生成.本地IP库.随机数量, config_JSON.优选订阅生成.本地IP库.指定端口)
 								)[0] : await env.KV.get('ADD.txt') ? await 整理成数组(await env.KV.get('ADD.txt')) : (
@@ -393,7 +439,7 @@ export default {
 								反代IP池 = 请求优选API内容[3] || [];
 								完整优选IP = [...new Set(优选IP.concat(优选API的IP))];
 							} else { // 优选订阅生成器
-								let 优选订阅生成器HOST = url.searchParams.get('sub') || config_JSON.优选订阅生成.SUB;
+								const 优选订阅生成器HOST = (!订阅用户 && url.searchParams.get('sub')) || config_JSON.优选订阅生成.SUB;
 								const [优选生成器IP数组, 优选生成器其他节点] = await 获取优选订阅生成器数据(优选订阅生成器HOST, 本机标识头);
 								完整优选IP = 完整优选IP.concat(优选生成器IP数组);
 								其他节点LINK += 优选生成器其他节点;
@@ -401,7 +447,7 @@ export default {
 							const ECHLINK参数 = config_JSON.ECH ? `&ech=${encodeURIComponent((config_JSON.ECHConfig.SNI ? config_JSON.ECHConfig.SNI + '+' : '') + config_JSON.ECHConfig.DNS)}` : '';
 							const isLoonOrSurge = ua.includes('loon') || ua.includes('surge');
 							const { type: 传输协议, 路径字段名, 域名字段名 } = 获取传输协议配置(config_JSON);
-							订阅内容 = 其他节点LINK + 完整优选IP.map(原始地址 => {
+							订阅内容 = (订阅用户 ? '' : 其他节点LINK) + 完整优选IP.map(原始地址 => {
 								// 统一正则: 匹配 域名/IPv4/IPv6地址 + 可选端口 + 可选备注
 								// 示例:
 								//   - 域名: hj.xmm1993.top:2096#备注 或 example.com
@@ -429,7 +475,7 @@ export default {
 									try {
 										const 代理协议 = 链式代理匹配[1].toLowerCase(), 代理参数 = 链式代理匹配[2];
 										const 链式代理数据 = { type: 代理协议, ...获取SOCKS5账号(代理参数, 获取代理默认端口(代理协议)) };
-										完整节点路径 = `/video/${base64SecretEncode(JSON.stringify(链式代理数据), userID) + (config_JSON.启用0RTT ? '?ed=2560' : '')}`;
+										完整节点路径 = `/video/${base64SecretEncode(JSON.stringify(链式代理数据), 凭据UUID) + (config_JSON.启用0RTT ? '?ed=2560' : '')}`;
 										节点备注 = 节点备注.replace(链式代理匹配[0], '').trim() || 节点地址;
 									} catch (error) {
 										console.warn(`[订阅内容] 链式代理解析失败，已忽略该指令: ${链式代理匹配[0]} (${error && error.message ? error.message : error})`);
@@ -448,28 +494,32 @@ export default {
 									}
 									完整节点路径 = (完整节点路径.includes('?') ? 完整节点路径.replace('?', '?enc=' + config_JSON.SS.加密方式 + '&') : (完整节点路径 + '?enc=' + config_JSON.SS.加密方式)).replace(/([=,])/g, '\\$1');
 									if (!isSubConverterRequest) 完整节点路径 = 完整节点路径 + ';mux=0';
-									return `${协议类型}://${btoa(config_JSON.SS.加密方式 + ':00000000-0000-4000-8000-000000000000')}@${节点地址}:${节点端口}?plugin=v2${encodeURIComponent('ray-plugin;mode=websocket;host=example.com;path=' + (config_JSON.随机路径 ? 随机路径(完整节点路径) : 完整节点路径) + (config_JSON.SS.TLS ? ';tls' : '')) + ECHLINK参数 + TLS分片参数}#${encodeURIComponent(节点备注)}`;
+									return `${协议类型}://${btoa(config_JSON.SS.加密方式 + ':00000000-0000-4000-8000-000000000000')}@${节点地址}:${节点端口}?plugin=v2${encodeURIComponent('ray-plugin;mode=websocket;host=example.com;path=' + 获取传输路径参数值({ ...config_JSON, 传输协议: 'ws' }, 完整节点路径) + (config_JSON.SS.TLS ? ';tls' : '')) + ECHLINK参数 + TLS分片参数}#${encodeURIComponent(节点备注)}`;
 								} else {
 									const 传输路径参数值 = 获取传输路径参数值(config_JSON, 完整节点路径, 作为优选订阅生成器);
 									return `${协议类型}://00000000-0000-4000-8000-000000000000@${节点地址}:${节点端口}?security=tls&type=${传输协议 + ECHLINK参数}&${域名字段名}=example.com&fp=${config_JSON.Fingerprint}&sni=example.com&${路径字段名}=${encodeURIComponent(传输路径参数值) + TLS分片参数}&encryption=none&alpn=${encodeURIComponent(config_JSON.ALPN)}#${encodeURIComponent(节点备注)}`;
 								}
 							}).filter(item => item !== null).join('\n');
 						} else { // 订阅转换
-							const 订阅转换URL = `${config_JSON.订阅转换配置.SUBAPI}/sub?target=${订阅类型}&url=${encodeURIComponent(url.protocol + '//' + url.host + '/sub?target=mixed&token=' + 今日订阅转换后端专属TOKEN + '&cnIspCode=' + 识别运营商(request) + (url.searchParams.has('sub') && url.searchParams.get('sub') != '' ? `&sub=${url.searchParams.get('sub')}` : ''))}&config=${encodeURIComponent(config_JSON.订阅转换配置.SUBCONFIG)}&emoji=${config_JSON.订阅转换配置.SUBEMOJI}&list=${config_JSON.订阅转换配置.SUBLIST}&scv=${config_JSON.跳过证书验证}&xudp=${config_JSON.订阅转换配置.XUDP}&udp=${config_JSON.订阅转换配置.UDP}&tls13=${config_JSON.订阅转换配置.TLS13}&append_type=${config_JSON.订阅转换配置.APPEND_TYPE}&sort=${config_JSON.订阅转换配置.SORT}&expand=${config_JSON.订阅转换配置.EXPAND}`;
+							const 订阅转换URL = `${config_JSON.订阅转换配置.SUBAPI}/sub?target=${订阅类型}&url=${encodeURIComponent(url.protocol + '//' + url.host + 订阅路径 + '?target=mixed&token=' + 今日订阅转换后端专属TOKEN + '&cnIspCode=' + 识别运营商(request) + (!订阅用户 && url.searchParams.has('sub') && url.searchParams.get('sub') != '' ? `&sub=${url.searchParams.get('sub')}` : ''))}&config=${encodeURIComponent(config_JSON.订阅转换配置.SUBCONFIG)}&emoji=${config_JSON.订阅转换配置.SUBEMOJI}&list=${config_JSON.订阅转换配置.SUBLIST}&scv=${config_JSON.跳过证书验证}&xudp=${config_JSON.订阅转换配置.XUDP}&udp=${config_JSON.订阅转换配置.UDP}&tls13=${config_JSON.订阅转换配置.TLS13}&append_type=${config_JSON.订阅转换配置.APPEND_TYPE}&sort=${config_JSON.订阅转换配置.SORT}&expand=${config_JSON.订阅转换配置.EXPAND}`;
 							try {
 								const response = await fetch(订阅转换URL, { headers: { 'User-Agent': 'Subconverter for ' + 订阅类型 + ' edge' + 'tunnel (https://github.com/' + 特征码字典[1] + '/edge' + 'tunnel) Uid/0x' + 本机标识头 + ' Version/' + EDT_版本号 } });
 								if (response.ok) {
 									订阅内容 = await response.text();
-									if (url.searchParams.has('surge') || ua.includes('surge')) 订阅内容 = Surge订阅配置文件热补丁(订阅内容, url.protocol + '//' + url.host + '/sub?token=' + 订阅TOKEN + '&surge', config_JSON);
+									if (url.searchParams.has('surge') || ua.includes('surge')) 订阅内容 = Surge订阅配置文件热补丁(订阅内容, url.protocol + '//' + url.host + 订阅路径 + '?token=' + 订阅TOKEN + '&surge', config_JSON);
 								} else return new Response('订阅转换后端异常：' + response.statusText, { status: response.status });
 							} catch (error) {
 								return new Response('订阅转换后端异常：' + error.message, { status: 403 });
 							}
 						}
 
-						if (!ua.includes('subconverter') && 用户客户端请求订阅) {
+						if (用户客户端请求订阅 && (订阅用户 || !ua.includes('subconverter'))) {
 							const 打乱后HOSTS = [...config_JSON.HOSTS].sort(() => Math.random() - 0.5);
 							let 替换域名计数 = 0, 当前随机HOST = null;
+							if (订阅用户 && 协议类型 === 'ss') {
+								const 加密方式 = config_JSON.SS.加密方式;
+								订阅内容 = 订阅内容.replaceAll(btoa(加密方式 + ':00000000-0000-4000-8000-000000000000'), btoa(加密方式 + ':' + 凭据UUID));
+							}
 							订阅内容 = 订阅内容
 								.replace(/00000000-0000-4000-8000-000000000000/g, config_JSON.UUID)
 								.replace(/MDAwMDAwMDAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMDAw/g, btoa(config_JSON.UUID))
@@ -494,12 +544,14 @@ export default {
 						}
 						return new Response(订阅内容, { status: 200, headers: responseHeaders });
 					}
+					if (订阅用户) return 用户错误(404);
 				} else if (访问路径 === 'locations') {//反代locations列表
 					const cookies = request.headers.get('Cookie') || '';
 					const authCookie = cookies.split(';').find(c => c.trim().startsWith('auth='))?.split('=')[1];
 					if (authCookie && authCookie == await MD5MD5(UA + 加密秘钥 + 管理员密码)) return fetch(new Request('https://speed.cloudflare.com/locations', { headers: { 'Referer': 'https://speed.cloudflare.com/' } }));
 				} else if (访问路径 === 'robots.txt') return new Response('User-agent: *\nDisallow: /', { status: 200, headers: { 'Content-Type': 'text/plain; charset=UTF-8' } });
-			} else if (!envUUID) return fetch(Pages静态页面 + '/noKV').then(r => { const headers = new Headers(r.headers); headers.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate'); headers.set('Pragma', 'no-cache'); headers.set('Expires', '0'); return new Response(r.body, { status: 404, statusText: r.statusText, headers }) });
+			} else if (订阅用户) return 用户错误(503);
+			else if (!envUUID) return fetch(Pages静态页面 + '/noKV').then(r => { const headers = new Headers(r.headers); headers.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate'); headers.set('Pragma', 'no-cache'); headers.set('Expires', '0'); return new Response(r.body, { status: 404, statusText: r.statusText, headers }) });
 		}
 
 		let 伪装页URL = env.URL || 'nginx';
@@ -548,6 +600,762 @@ const HPACKHuffman码长 = [
 	26, 27, 26, 26, 27, 27, 27, 27, 27, 28, 27, 27, 27, 27, 27, 26,
 	30
 ];
+
+function 用户JSON(data, status = 200) {
+	return Response.json(data, {
+		status,
+		headers: { 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' },
+	});
+}
+
+function 用户错误(status, message = '用户或订阅不可用') {
+	return 用户JSON({ error: message }, status);
+}
+
+function 读取订阅用户(db, id) {
+	return db.withSession('first-primary')
+		.prepare('SELECT id, node_uuid, sub_token, expires_at, enabled FROM subscription_users WHERE id = ?')
+		.bind(id).first();
+}
+
+async function 管理订阅用户(request, url, db, path) {
+	if (!db) return 用户错误(503, '请先绑定 USERS_DB 数据库并执行建表 SQL。');
+	const id = path === 'admin/users/api' ? null : path.slice('admin/users/api/'.length);
+	if (id !== null && !uuidRegex.test(id)) return 用户错误(404);
+	const method = request.method;
+	if (!(id === null ? ['GET', 'POST'] : ['PUT', 'DELETE']).includes(method)) return 用户错误(405, '此方法不可用。');
+
+	try {
+		const session = db.withSession('first-primary');
+		if (method === 'GET') {
+			const cursor = url.searchParams.get('after') ?? '';
+			if (cursor && !uuidRegex.test(cursor)) return 用户错误(400, '分页参数无效。');
+			const { results } = await session.prepare(
+				'SELECT id, name, sub_token, expires_at, enabled, revision FROM subscription_users WHERE id > ? ORDER BY id LIMIT 51'
+			).bind(cursor).all();
+			const users = results.slice(0, 50);
+			return 用户JSON({ users, next: results.length > 50 ? users.at(-1).id : null });
+		}
+
+		if (request.headers.get('Origin') !== url.origin) return 用户错误(403, '请从本站后台提交修改。');
+		if (request.headers.get('Content-Type')?.split(';')[0].trim().toLowerCase() !== 'application/json') {
+			return 用户错误(415, '请求必须使用 JSON。');
+		}
+		const input = await request.json().catch(() => null);
+		if (!input || typeof input !== 'object' || Array.isArray(input)) return 用户错误(400, '请求数据无效。');
+		if (id !== null && (!Number.isSafeInteger(input.revision) || input.revision < 1)) {
+			return 用户错误(400, '版本号无效，请重新加载列表。');
+		}
+
+		if (method === 'DELETE') {
+			const { meta } = await session.prepare('DELETE FROM subscription_users WHERE id = ? AND revision = ?')
+				.bind(id, input.revision).run();
+			return meta.changes ? 用户JSON({ success: true }) : 用户错误(409, '用户已被修改或删除，请刷新后重试。');
+		}
+
+		const name = typeof input.name === 'string' ? input.name.trim() : '';
+		const expiresAt = input.expires_at;
+		if (!name || name.length > 80) return 用户错误(400, '名称长度须为 1 至 80 个字符。');
+		if (!Number.isSafeInteger(expiresAt) || expiresAt < 0 || expiresAt > Date.UTC(9999, 11, 31, 23, 59, 59)) {
+			return 用户错误(400, '到期时间无效。');
+		}
+		if (typeof input.enabled !== 'boolean') return 用户错误(400, '用户状态无效。');
+		const enabled = Number(input.enabled);
+
+		if (method === 'POST') {
+			if (expiresAt <= Date.now()) return 用户错误(400, '新用户的到期时间须晚于当前时间。');
+			const user = {
+				id: crypto.randomUUID(),
+				name,
+				sub_token: crypto.randomUUID().replaceAll('-', '') + crypto.randomUUID().replaceAll('-', ''),
+				expires_at: expiresAt,
+				enabled,
+				revision: 1,
+			};
+			await session.prepare(
+				'INSERT INTO subscription_users (id, name, node_uuid, sub_token, expires_at, enabled) VALUES (?, ?, ?, ?, ?, ?)'
+			).bind(user.id, name, crypto.randomUUID(), user.sub_token, expiresAt, enabled).run();
+			return 用户JSON({ user }, 201);
+		}
+
+		const { meta } = await session.prepare(
+			'UPDATE subscription_users SET name = ?, expires_at = ?, enabled = ?, revision = revision + 1 WHERE id = ? AND revision = ?'
+		).bind(name, expiresAt, enabled, id, input.revision).run();
+		return meta.changes ? 用户JSON({ success: true }) : 用户错误(409, '用户已被修改或删除，请刷新后重试。');
+	} catch (error) {
+		console.error('管理用户数据库失败', error.message);
+		return 用户错误(503, '用户数据库暂不可用，请检查 D1 绑定和表结构。');
+	}
+}
+
+const 管理导航 = [
+	['overview', '总览', '◫', '/admin'],
+	['users', '用户管理', '♙', '/admin/users'],
+	['connection', '连接设置', '⇄', '/admin?view=connection'],
+	['subscriptions', '订阅设置', '◉', '/admin?view=subscriptions'],
+	['integrations', '服务集成', '◇', '/admin?view=integrations'],
+	['activity', '运行日志', '≡', '/admin?view=activity'],
+];
+
+const 管理样式 = String.raw`
+:root{color-scheme:light dark;--bg:#f3f5f9;--surface:#fff;--soft:#f3f5fa;--text:#182235;--muted:#56647b;--line:#dce3ee;--accent:#234cc5;--accent-bg:#e7eeff;--primary:#244bc4;--good:#106847;--good-bg:#e6f5ee;--bad:#a3273d;--bad-bg:#fcecf0;--shadow:0 8px 28px #23355d09;--side:#edf1f9;--hero:#14234c;font:16px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif}
+@media(prefers-color-scheme:dark){:root{--bg:#111625;--surface:#1a2235;--soft:#212c43;--text:#f1f4fd;--muted:#aeb9d0;--line:#36445e;--accent:#aac1ff;--accent-bg:#293e70;--primary:#4164dc;--good:#8ce1bc;--good-bg:#193c38;--bad:#ffb6c2;--bad-bg:#472b3d;--shadow:0 8px 28px #0002;--side:#161e31;--hero:#182b5b}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text)}h1,h2,p,dl,dd{margin:0}a{color:var(--accent)}[hidden]{display:none!important}button.quiet.danger{background:transparent;color:var(--bad)}
+:focus-visible{outline:3px solid var(--accent);outline-offset:3px}
+button,input,textarea,select{font:inherit;color:inherit}button,.button{min-height:44px;min-width:44px;border:1px solid transparent;display:inline-flex;align-items:center;justify-content:center;gap:.5rem;padding:.52rem .86rem;border-radius:11px;background:var(--soft);color:var(--text);text-decoration:none;font-weight:650;cursor:pointer}
+button,.button,nav a{transition:background-color .16s ease,box-shadow .16s ease}
+button:hover,.button:hover{box-shadow:inset 0 0 0 1px var(--line)}button:active,.button:active{box-shadow:inset 0 0 0 2px var(--accent)}
+button:disabled{opacity:.52;cursor:default;box-shadow:none}
+.primary{background:var(--primary);color:#fff}.primary:hover{box-shadow:inset 0 0 0 1px #ffffff75}.quiet{background:transparent;color:var(--accent)}.danger{color:var(--bad)}button.danger{background:var(--bad-bg)}
+input:not([type=checkbox]),textarea,select{width:100%;min-width:0;min-height:44px;border:1px solid var(--line);border-radius:10px;background:var(--surface);padding:.55rem .75rem}
+input[type=checkbox]{width:1.22rem;height:1.22rem;accent-color:var(--primary);flex:none}textarea{resize:vertical}code,pre,.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:.88rem}pre{white-space:pre-wrap;overflow-wrap:anywhere}
+.wrap{min-height:100dvh;display:grid;grid-template-columns:258px minmax(0,1fr);grid-template-areas:"sidebar main"}
+.sidebar{grid-area:sidebar;position:sticky;top:0;height:100dvh;background:var(--side);border-inline-end:1px solid var(--line);padding:28px 19px 18px;display:flex;flex-direction:column;gap:35px;overflow:auto}
+.brand{display:inline-flex;align-items:center;gap:.7rem;font-weight:750;font-size:1.1rem;color:var(--text);text-decoration:none;min-height:44px;padding:0 8px;white-space:nowrap}
+.logo{width:38px;height:38px;border-radius:12px;background:linear-gradient(155deg,#7189ff,#2e4bc7 67%);display:inline-grid;place-items:center;color:white;box-shadow:0 4px 9px #2748b344;flex:none}.logo:before{content:"";height:13px;width:19px;border:2px solid currentColor;border-radius:6px;transform:rotate(-32deg);box-shadow:inset 0 0 0 2px #ffffff30}
+.sidebar nav{display:grid;gap:5px}.nav-label{padding:0 12px .42rem;color:var(--muted);font-size:.77rem;font-weight:700;letter-spacing:.06em}
+nav a{display:flex;align-items:center;gap:12px;padding:8px 11px;min-height:44px;border-radius:11px;color:var(--muted);font-size:.93rem;font-weight:650;text-decoration:none;white-space:nowrap}
+nav a:hover{background:var(--soft);color:var(--text)}nav a[aria-current]{background:var(--accent-bg);color:var(--accent)}
+.nav-icon{display:grid;place-items:center;width:24px;height:24px;border-radius:7px;background:var(--surface);color:var(--accent);font-weight:700;font-size:1rem;flex:none}
+.sidebar-footer{margin-top:auto}.skip{position:fixed;inset:6px auto auto 8px;z-index:10;transform:translateY(-160%)}.skip:focus{transform:none}
+.main{grid-area:main;width:min(100%,1260px);margin-inline:auto;padding:30px clamp(22px,4vw,62px) 64px;min-width:0}
+.topbar,.heading,.section-head,.actions,.paging{display:flex;align-items:center;gap:.65rem;flex-wrap:wrap}.topbar,.heading,.section-head{justify-content:space-between}.topbar{min-height:46px;border-bottom:1px solid var(--line);padding-bottom:12px;margin-bottom:28px;color:var(--muted);font-size:.87rem}.mobile-logout{display:none}
+.heading{align-items:flex-end;margin-bottom:22px;gap:1rem}.heading h1,.hero h1{font-size:clamp(2rem,4vw,3.15rem);font-weight:760;letter-spacing:-.055em;line-height:1.1}.heading p{margin-top:.54rem;color:var(--muted);max-width:60ch}
+.hero{background:var(--hero);position:relative;isolation:isolate;overflow:hidden;padding:clamp(26px,5vw,56px);border-radius:23px;color:#f4f7ff;box-shadow:var(--shadow);margin-bottom:20px;min-height:249px;display:grid;align-content:center;justify-items:start;gap:13px}
+.hero:before{content:"";position:absolute;z-index:-1;inset:0;background:radial-gradient(ellipse at 100% 53%,#6087f237,transparent 56%),linear-gradient(115deg,#0c112b,transparent 60%)}
+.hero:after{content:"";position:absolute;z-index:-1;width:min(50vw,395px);aspect-ratio:1;right:-22px;top:50%;transform:translateY(-50%) rotate(-17deg);border:1px solid #a5bcff58;border-radius:33%;background:linear-gradient(30deg,#4575ff30,transparent 64%);box-shadow:0 0 0 30px #7192ff12,0 0 0 60px #7192ff0c,0 0 0 90px #7192ff08,inset 0 0 65px #7192ff26;pointer-events:none}
+.hero p{color:#c3d2f4;overflow-wrap:anywhere}.hero .actions{margin-top:8px}.hero .quiet{background:#ffffff19;color:#f7f9ff;border-color:#b9caff50}.hero :focus-visible{outline-color:#cbd7ff}
+.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-bottom:20px}.card,.panel{background:var(--surface);border:1px solid var(--line);border-radius:17px;box-shadow:var(--shadow);min-width:0}.card{padding:18px 20px}.card dt{color:var(--muted);font-size:.85rem}.card dd{font-size:1.18rem;font-weight:740;margin-top:5px;overflow-wrap:anywhere}
+.panel{margin-bottom:16px;padding:20px}.section-head{margin-bottom:12px}.section-head h2,.panel h2{font-size:1.14rem;letter-spacing:-.02em}.panel p{color:var(--muted)}.panel p.danger{color:var(--bad)}.panel p+p{margin-top:.5rem}.panel .actions:last-child{margin-top:12px}
+.bare{border:0;margin:0;padding:0;min-inline-size:0}.setting-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px 20px}.field{display:grid;gap:.35rem;font-size:.91rem;font-weight:630;min-width:0}.field small,.hint{font-size:.83rem;color:var(--muted);font-weight:400}.field-wide{grid-column:1/-1}.check{min-height:44px;display:flex;align-items:center;gap:9px;font-weight:600;font-size:.92rem;cursor:pointer}
+.status-area{min-height:1.6rem;margin-bottom:14px;color:var(--muted);overflow-wrap:anywhere}.status-area.danger{color:var(--bad)}.settings-buttons{margin-top:16px}.note{margin-bottom:12px}.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;text-align:start}
+th,td{text-align:start;padding:10px 8px;border-bottom:1px solid var(--line);overflow-wrap:anywhere}th{color:var(--muted);font-size:.84rem;font-weight:650}tbody tr:last-child td{border-bottom:0}td:first-child{font-weight:650}td .actions{flex-wrap:nowrap;gap:4px}.nowrap{white-space:nowrap}.paging{justify-content:flex-end;margin-top:14px}.pill{display:inline-block;padding:3px 9px;border-radius:999px;color:var(--muted);background:var(--soft);font-size:.8rem;font-weight:700;white-space:nowrap}.pill.enabled{color:var(--good);background:var(--good-bg)}
+#created label{display:block;margin-bottom:8px}#created input{flex:1 1 215px}
+details summary{cursor:pointer;font-weight:650;min-height:44px;padding:.58rem 0}details[open] summary{margin-bottom:8px}
+dialog{color:var(--text);background:var(--surface);border:1px solid var(--line);border-radius:20px;width:min(520px,calc(100% - 28px));max-height:calc(100dvh - 30px);padding:24px;box-shadow:0 24px 80px #0c142554}dialog[open]{animation:appear .18s ease-out}dialog::backdrop{background:#10183285}dialog .actions{margin-top:14px}dialog h2{margin-bottom:12px;font-size:1.35rem}dialog .field{margin-bottom:12px}dialog p{overflow-wrap:anywhere}dialog [role=alert]:empty{display:none}
+.login{min-height:100dvh;display:grid;place-items:center;padding:24px;background:radial-gradient(ellipse at top right,var(--accent-bg),transparent 55%),var(--bg)}.login .panel{width:min(100%,430px);padding:clamp(22px,6vw,38px)}.login h1{font-size:1.9rem;letter-spacing:-.055em;margin-top:17px}.login form{display:grid;gap:12px;margin-top:19px}.login .brand{padding:0}
+@keyframes appear{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
+@media(prefers-contrast:more){:root{--line:var(--muted)}.pill,.primary,.hero .quiet{border:1px solid currentColor}}
+@media(max-width:920px){.wrap{grid-template-columns:205px minmax(0,1fr)}.sidebar{padding-inline:12px}.main{padding-inline:24px}.grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:680px){.wrap{display:block}.sidebar{height:auto;position:static;gap:10px;padding:12px 14px 8px;border-inline-end:0;border-bottom:1px solid var(--line);overflow:visible}.sidebar nav{display:flex;flex-wrap:wrap;gap:4px}.nav-label,.sidebar-footer{display:none}.mobile-logout{display:inline-flex}.main{padding:14px 15px 38px}.topbar{margin-bottom:16px}.hero{border-radius:17px}.hero:after{right:-65px;width:210px}.grid,.setting-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.panel,.card{padding:14px}.log-table{min-width:570px}.users-table,.users-table tbody{display:block}.users-table thead{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}.users-table tr{display:grid;grid-template-columns:minmax(0,1fr) auto;padding:10px 0;border-bottom:1px solid var(--line)}.users-table tr:last-child{border:0}.users-table td{display:block;border:0;padding:4px 0}.users-table td:nth-child(2){grid-row:2;color:var(--muted);font-size:.88rem}.users-table td:nth-child(3){grid-column:2;grid-row:1}.users-table td:nth-child(4){grid-column:1/-1}.users-table td .actions{flex-wrap:wrap}}
+@media(max-width:420px){.setting-grid{grid-template-columns:minmax(0,1fr)}.grid .card:last-child:nth-child(odd){grid-column:1/-1}.hero .actions{gap:.45rem}.nav-icon{display:none}}
+`;
+
+function 管理HTML(title, nonce, content, script, status = 200) {
+	return new Response(`<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><title>${title} · edgetunnel</title><style nonce="${nonce}">${管理样式}</style></head><body>${content}<script nonce="${nonce}">${管理客户端公共代码}\n${script}</script></body></html>`, {
+		status,
+		headers: {
+			'Content-Type': 'text/html; charset=utf-8',
+			'Cache-Control': 'no-store',
+			'Referrer-Policy': 'no-referrer',
+			'Content-Security-Policy': `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'`,
+		},
+	});
+}
+
+function 管理布局(active, content) {
+	const title = 管理导航.find(([id]) => id === active)[1];
+	const links = 管理导航.map(([id, label, icon, href]) => `<a href="${href}"${id === active ? ' aria-current="page"' : ''}><span class="nav-icon" aria-hidden="true">${icon}</span>${label}</a>`).join('');
+	return 管理HTML(title, crypto.randomUUID(), `
+<a class="button skip" href="#main">跳至主要内容</a><div class="wrap">
+<aside class="sidebar"><a class="brand" href="/admin"><span class="logo" aria-hidden="true"></span>edgetunnel</a>
+<div><div class="nav-label">管理后台</div><nav aria-label="后台导航">${links}</nav></div>
+<div class="sidebar-footer"><a class="button quiet" href="/logout">退出登录</a></div></aside>
+<main class="main" id="main" tabindex="-1"><div class="topbar"><span>管理后台 / ${title}</span><a class="button quiet mobile-logout" href="/logout">退出登录</a></div>${content.markup}</main></div>`, content.script);
+}
+
+const 管理客户端公共代码 = String.raw`
+const find = id => document.getElementById(id);
+async function adminFetch(path, options = {}) {
+	const response = await fetch(path, { cache: 'no-store', ...options });
+	if (response.redirected || response.status === 401) throw new Error('登录已失效，请重新登录。');
+	const isJSON = response.headers.get('Content-Type')?.includes('application/json');
+	const data = isJSON ? await response.json() : await response.text();
+	if (!response.ok || data?.error || data?.success === false) throw new Error(data?.error || data?.msg || '请求失败（' + response.status + '）');
+	return data;
+}
+function sendJSON(path, data, method = 'POST') {
+	return adminFetch(path, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+}
+function notice(message, isError = false) {
+	find('notice').textContent = message;
+	find('notice').classList.toggle('danger', isError);
+}
+async function copy(value, status = find('notice')) {
+	try {
+		await navigator.clipboard.writeText(value);
+		status.textContent = '已复制到剪贴板。';
+		if (status === find('notice')) notice(status.textContent);
+	} catch {
+		window.prompt('复制', value);
+	}
+}
+`;
+
+function 管理登录页面(error = false) {
+	return 管理HTML('登录', crypto.randomUUID(), `
+<main class="login"><section class="panel" aria-labelledby="login-title">
+<div class="brand"><span class="logo" aria-hidden="true"></span>edgetunnel</div>
+<h1 id="login-title">登录管理后台</h1>
+<form id="login-form" method="post" action="/login">
+<label class="field" for="password">管理员密码</label><input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
+<p role="alert" class="danger" id="login-error"${error ? '' : ' hidden'}>密码不正确，请重试。</p>
+<button type="submit" class="primary" id="sign-in">登录</button></form></section></main>`, String.raw`
+find('login-form').addEventListener('submit', async event => {
+	event.preventDefault();
+	const button = find('sign-in');
+	button.disabled = true;
+	find('login-error').hidden = true;
+	try {
+		const response = await fetch('/login', { method: 'POST', body: new URLSearchParams(new FormData(event.currentTarget)) });
+		if (response.redirected) return location.assign('/admin');
+		if (!response.ok) throw new Error(response.status === 401 ? '密码不正确，请重试。' : '登录失败，请重试。');
+		location.assign('/admin');
+	} catch (error) {
+		find('login-error').textContent = error.message;
+		find('login-error').hidden = false;
+		find('password').focus();
+	} finally {
+		button.disabled = false;
+	}
+});`, error ? 401 : 200);
+}
+
+function 管理标题(title, description, actions = '') {
+	return `<div class="heading"><div><h1>${title}</h1><p>${description}</p></div><div class="actions">${actions}</div></div><p id="notice" class="status-area" role="status"></p>`;
+}
+
+const 连接字段 = [
+	['HOSTS', '节点域名', 'list'],
+	['PATH', '节点路径', 'text', null, 'PATH 环境变量优先于此值。'],
+	['协议类型', '协议', 'select', [['vless', 'VLESS'], ['trojan', 'Trojan'], ['ss', 'Shadowsocks']]],
+	['传输协议', '传输方式', 'select', [['ws', 'WebSocket'], ['grpc', 'gRPC'], ['xhttp', 'XHTTP']]],
+	['ALPN', 'ALPN', 'text'],
+	['Fingerprint', 'TLS 指纹', 'text'],
+	['ECH', '启用 ECH', 'check'],
+	['跳过证书验证', '跳过证书验证', 'check'],
+	['启用0RTT', '启用 0-RTT', 'check'],
+	['随机路径', '随机化节点路径', 'check'],
+	['连接复用.启用', '连接复用', 'check'],
+	['SS.TLS', 'Shadowsocks TLS', 'check'],
+];
+
+const 反代字段 = [
+	['反代.' + 特征码字典[0], '反代地址', 'text'],
+	['反代.SOCKS5.启用', '上游代理协议', 'select', [['', '关闭'], ['socks5', 'SOCKS5'], ['http', 'HTTP'], ['https', 'HTTPS'], ['turn', 'TURN'], ['sstp', 'SSTP']]],
+	['反代.SOCKS5.账号', '上游代理地址及凭据', 'password'],
+	['反代.SOCKS5.全局', '全局使用上游代理', 'check'],
+];
+
+const 订阅字段 = [
+	['优选订阅生成.SUBNAME', '订阅名称', 'text'],
+	['优选订阅生成.SUBUpdateTime', '刷新间隔（小时）', 'number', [0.1, 8760, 'any']],
+	['优选订阅生成.local', '使用本地优选', 'check'],
+	['优选订阅生成.本地IP库.随机IP', '生成随机优选地址', 'check'],
+	['优选订阅生成.本地IP库.随机数量', '随机地址数量', 'number', [1, 65535, 1]],
+	['优选订阅生成.本地IP库.指定端口', '优选端口（−1 为随机）', 'number', [-1, 65535, 1]],
+	['优选订阅生成.SUB', '外部优选订阅源', 'text'],
+];
+const 转换字段 = [
+	['订阅转换配置.SUBAPI', '订阅转换服务', 'url'],
+	['订阅转换配置.SUBCONFIG', '规则配置地址', 'url'],
+	...Object.entries({ SUBEMOJI: '添加 Emoji', SUBLIST: '仅输出节点', UDP: 'UDP', XUDP: 'XUDP', TLS13: 'TLS 1.3', APPEND_TYPE: '添加节点类型', SORT: '节点排序', EXPAND: '展开规则' })
+		.map(([key, label]) => ['订阅转换配置.' + key, label, 'check']),
+];
+
+function 管理字段([key, label, type, options, hint]) {
+	if (type === 'check') return `<label class="check"><input type="checkbox" data-setting="${key}">${label}</label>`;
+	const id = 'setting-' + key;
+	const attributes = `id="${id}" data-setting="${key}"${hint ? ` aria-describedby="${id}-hint"` : ''}`;
+	const control = type === 'select'
+		? `<select ${attributes}>${options.map(([value, text]) => `<option value="${value}">${text}</option>`).join('')}</select>`
+		: type === 'list' ? `<textarea ${attributes} data-list rows="2" spellcheck="false"></textarea>`
+		: `<input type="${type}" ${attributes} autocomplete="off"${options ? ` min="${options[0]}" max="${options[1]}" step="${options[2]}"` : ''}>`;
+	return `<div class="field${type === 'list' ? ' field-wide' : ''}"><label for="${id}">${label}</label>${control}${hint ? `<small id="${id}-hint">${hint}</small>` : ''}</div>`;
+}
+function 管理字段组(title, fields) {
+	return `<section class="panel"><div class="section-head"><h2>${title}</h2></div><div class="setting-grid">${fields.map(管理字段).join('')}</div></section>`;
+}
+
+const 管理配置脚本 = String.raw`
+let config;
+const configFields = [...document.querySelectorAll('[data-setting]')];
+const configForm = find('config-form');
+function showConfig(value) {
+	config = value;
+	for (const field of configFields) {
+		const current = field.dataset.setting.split('.').reduce((part, key) => part?.[key], config);
+		if (field.type === 'checkbox') field.checked = Boolean(current);
+		else if ('list' in field.dataset) field.value = Array.isArray(current) ? current.join('\n') : current ?? '';
+		else {
+			if (field.tagName === 'SELECT' && current != null && ![...field.options].some(option => option.value === String(current))) {
+				field.add(new Option(current, current));
+			}
+			field.value = current ?? '';
+		}
+	}
+	if (find('raw-config')) find('raw-config').value = JSON.stringify(config, null, 2);
+}
+async function loadConfig() {
+	showConfig(await adminFetch('/admin/config.json'));
+	find('config-fields').disabled = false;
+	find('save-config').disabled = false;
+	if (find('save-raw')) find('save-raw').disabled = false;
+}
+async function saveConfig(button, next) {
+	button.disabled = true;
+	try {
+		await sendJSON('/admin/config.json', next);
+		await loadConfig();
+		notice('配置已保存。');
+	} catch (error) {
+		notice(error.message, true);
+	} finally {
+		button.disabled = false;
+	}
+}
+configForm.addEventListener('submit', event => {
+	event.preventDefault();
+	const next = structuredClone(config);
+	for (const field of configFields) {
+		const path = field.dataset.setting.split('.');
+		const key = path.pop();
+		const owner = path.reduce((part, item) => part[item] ??= {}, next);
+		if (field.type === 'checkbox') owner[key] = field.checked;
+		else if ('list' in field.dataset) owner[key] = field.value.split(/[\s,]+/).filter(Boolean);
+		else if (field.type === 'number') { if (field.value !== '') owner[key] = field.valueAsNumber; }
+		else owner[key] = field.value || (owner[key] === null ? null : '');
+	}
+	if (Array.isArray(next.HOSTS) && !next.HOSTS.length) return notice('请填写至少一个节点域名。', true);
+	saveConfig(find('save-config'), next);
+});
+loadConfig().catch(error => notice(error.message, true));
+`;
+
+const 管理工具脚本 = String.raw`
+function bindAction(id, operation, status = find('notice')) {
+	const button = find(id);
+	button.addEventListener('click', async () => {
+		button.disabled = true;
+		status.classList.remove('danger');
+		status.textContent = '正在处理…';
+		try { status.textContent = await operation() || ''; }
+		catch (error) { status.textContent = error.message; status.classList.add('danger'); }
+		finally { button.disabled = false; }
+	});
+}
+`;
+
+function 管理控制台(view) {
+	switch (view) {
+		case 'connection': return 管理布局(view, {
+			markup: 管理标题('连接设置', '配置节点域名、传输协议和出站代理。', '<button type="submit" form="config-form" class="primary" id="save-config" disabled>保存连接设置</button>') + `
+<form id="config-form"><fieldset class="bare" id="config-fields" disabled>
+${管理字段组('传输与安全', 连接字段)}${管理字段组('出站代理', 反代字段)}</fieldset></form>
+<section class="panel"><div class="section-head"><h2>代理检测</h2></div><div class="setting-grid">
+<label class="field">协议<select id="check-protocol"><option value="socks5">SOCKS5</option><option value="http">HTTP</option><option value="https">HTTPS</option><option value="turn">TURN</option><option value="sstp">SSTP</option></select></label>
+<label class="field">代理地址<input id="check-address" autocomplete="off" placeholder="host:port"></label></div>
+<div class="actions"><button id="check-proxy">检测连接</button><p id="check-result" role="status"></p></div></section>
+<details class="panel"><summary>高级配置</summary>
+<label class="field">完整配置 JSON<textarea class="mono" id="raw-config" rows="14" spellcheck="false"></textarea></label>
+<div class="actions"><button id="save-raw" disabled>保存 JSON</button><button class="danger" id="reset-config">恢复默认配置</button></div></details>
+<dialog id="reset-dialog" aria-labelledby="reset-title"><h2 id="reset-title">恢复默认配置？</h2><p>当前节点和订阅设置将被默认值覆盖。</p><div class="actions"><button autofocus id="cancel-reset">取消</button><button class="danger" id="confirm-reset">恢复默认</button></div><p id="reset-error" role="alert" class="danger"></p></dialog>`,
+			script: 管理配置脚本 + 管理工具脚本 + String.raw`
+bindAction('check-proxy', async () => {
+	const address = find('check-address').value.trim();
+	if (!address) throw new Error('请填写代理地址。');
+	const result = await adminFetch('/admin/check?' + new URLSearchParams({ [find('check-protocol').value]: address }));
+	return [result.ip, result.loc, result.responseTime + ' ms'].join(' · ');
+}, find('check-result'));
+find('save-raw').addEventListener('click', event => {
+	try {
+		const next = JSON.parse(find('raw-config').value);
+		if (!next || typeof next !== 'object' || Array.isArray(next) || !next.UUID || !next.HOST) throw new Error('配置须包含 HOST 和 UUID。');
+		saveConfig(event.currentTarget, next);
+	} catch (error) { notice(error.message, true); }
+});
+const resetDialog = find('reset-dialog');
+find('reset-config').addEventListener('click', () => { find('reset-error').textContent = ''; resetDialog.showModal(); });
+find('cancel-reset').addEventListener('click', () => resetDialog.close());
+resetDialog.addEventListener('cancel', event => { if (find('confirm-reset').disabled) event.preventDefault(); });
+bindAction('confirm-reset', async () => {
+	find('cancel-reset').disabled = true;
+	try {
+		showConfig(await adminFetch('/admin/init', { method: 'POST' }));
+		find('config-fields').disabled = find('save-config').disabled = find('save-raw').disabled = false;
+		resetDialog.close();
+		notice('已恢复默认配置。');
+	} finally { find('cancel-reset').disabled = false; }
+}, find('reset-error'));
+`,
+		});
+		case 'subscriptions': return 管理布局(view, {
+			markup: 管理标题('订阅设置', '管理订阅来源、优选地址与客户端转换规则。', '<button type="submit" form="config-form" class="primary" id="save-config" disabled>保存订阅设置</button>') + `
+<form id="config-form"><fieldset class="bare" id="config-fields" disabled>
+${管理字段组('生成规则', 订阅字段)}${管理字段组('订阅转换', 转换字段)}</fieldset></form>
+<section class="panel"><div class="section-head"><h2>优选地址</h2></div>
+<label class="field">每行一个地址，可带端口与备注<textarea rows="8" id="addresses" class="mono" spellcheck="false"></textarea></label>
+<div class="actions"><button id="save-addresses" disabled>保存优选地址</button><p id="address-status" role="status"></p></div></section>
+<section class="panel"><div class="section-head"><h2>优选 API</h2></div><div class="setting-grid">
+<label class="field">API 地址<input type="url" id="address-api"></label><label class="field">默认端口<input type="number" min="1" max="65535" id="address-port" value="443"></label></div>
+<div class="actions"><button id="test-address">查询地址</button><button id="append-address" disabled>追加到优选地址</button><p id="api-status" role="status"></p></div><pre id="api-results" hidden></pre></section>`,
+			script: 管理配置脚本 + 管理工具脚本 + String.raw`
+async function loadAddresses() {
+	const value = await adminFetch('/admin/ADD.txt');
+	find('addresses').value = value === 'null' ? '' : value;
+	find('save-addresses').disabled = false;
+}
+loadAddresses().catch(error => { find('address-status').textContent = error.message; find('address-status').classList.add('danger'); });
+bindAction('save-addresses', async () => {
+	await adminFetch('/admin/ADD.txt', { method: 'POST', body: find('addresses').value });
+	return '优选地址已保存。';
+}, find('address-status'));
+let fetchedAddresses = [];
+bindAction('test-address', async () => {
+	find('append-address').disabled = true;
+	find('api-results').hidden = true;
+	const endpoint = find('address-api');
+	const port = find('address-port');
+	if (!endpoint.value.trim() || !endpoint.checkValidity() || !port.checkValidity()) throw new Error('请填写有效的 API 地址和端口。');
+	const result = await adminFetch('/admin/getADDAPI?' + new URLSearchParams({ url: endpoint.value, port: port.value || '443' }));
+	fetchedAddresses = result.data;
+	find('api-results').textContent = fetchedAddresses.join('\n');
+	find('api-results').hidden = !fetchedAddresses.length;
+	find('append-address').disabled = !fetchedAddresses.length || find('save-addresses').disabled;
+	return '返回 ' + fetchedAddresses.length + ' 条地址。';
+}, find('api-status'));
+find('append-address').addEventListener('click', () => {
+	const input = find('addresses');
+	input.value = [...new Set(input.value.split(/\r?\n/).filter(Boolean).concat(fetchedAddresses))].join('\n');
+	find('address-status').textContent = '已追加，请保存优选地址。';
+	input.focus();
+});`,
+		});
+		case 'integrations': return 管理布局(view, {
+			markup: 管理标题('服务集成', '配置 Cloudflare 请求统计与 Telegram 通知。') + `
+<section class="panel"><div class="section-head"><h2>Cloudflare 用量</h2><span id="cf-state" class="pill">读取中</span></div>
+<div class="setting-grid"><label class="field">认证方式<select id="cf-mode"><option value="token">账户 ID 与 API Token</option><option value="key">邮箱与 Global API Key</option><option value="url">自定义用量 API</option></select></label>
+<label class="field" id="cf-id-label"><span id="cf-id-title">账户 ID</span><input id="cf-id" autocomplete="off"></label><label class="field" id="cf-secret-label"><span id="cf-secret-title">API Token</span><input id="cf-secret" type="password" autocomplete="off"></label>
+<label class="field" id="cf-url-label" hidden>用量 API 地址<input type="url" id="cf-url"></label></div>
+<div class="actions"><button id="save-cf" class="primary" disabled>保存 Cloudflare 配置</button><button id="clear-cf" disabled>清除配置</button></div></section>
+<section class="panel"><div class="section-head"><h2>Telegram 通知</h2><span id="tg-state" class="pill">读取中</span></div>
+<div class="setting-grid"><label class="field">Bot Token<input type="password" id="tg-token" autocomplete="off"></label><label class="field">Chat ID<input id="tg-chat" autocomplete="off"></label><label class="check"><input type="checkbox" id="tg-toggle">发送通知</label></div>
+<div class="actions"><button id="save-tg" class="primary" disabled>保存 Telegram 配置</button><button id="clear-tg" disabled>清除凭据</button></div></section>`,
+			script: 管理工具脚本 + String.raw`
+let config;
+function setMode() {
+	const mode = find('cf-mode').value;
+	find('cf-id-title').textContent = mode === 'key' ? '账户邮箱' : '账户 ID';
+	find('cf-secret-title').textContent = mode === 'key' ? 'Global API Key' : 'API Token';
+	find('cf-id-label').hidden = find('cf-secret-label').hidden = mode === 'url';
+	find('cf-url-label').hidden = mode !== 'url';
+}
+find('cf-mode').addEventListener('change', () => { find('cf-id').value = ''; find('cf-secret').value = ''; setMode(); });
+async function loadIntegrations() {
+	config = await adminFetch('/admin/config.json');
+	const cf = config.CF;
+	find('cf-state').textContent = cf?.Usage?.success ? '已连接' : cf?.AccountID || cf?.Email || cf?.UsageAPI ? '已配置' : '未连接';
+	find('cf-state').classList.toggle('enabled', Boolean(cf?.Usage?.success));
+	find('tg-state').textContent = config.TG?.BotToken ? '已配置凭据' : '未配置';
+	find('tg-toggle').checked = Boolean(config.TG?.启用);
+	find('tg-chat').value = config.TG?.ChatID ?? '';
+	find('tg-token').value = '';
+	find('cf-secret').value = '';
+	find('cf-mode').value = cf?.UsageAPI ? 'url' : cf?.Email ? 'key' : 'token';
+	find('cf-id').value = cf?.Email || '';
+	find('cf-url').value = cf?.UsageAPI || '';
+	setMode();
+	for (const id of ['save-cf', 'clear-cf', 'save-tg', 'clear-tg']) find(id).disabled = false;
+}
+bindAction('save-cf', async () => {
+	const mode = find('cf-mode').value;
+	const id = find('cf-id').value.trim(), secret = find('cf-secret').value.trim(), url = find('cf-url').value.trim();
+	if (mode === 'url' ? !url || !find('cf-url').checkValidity() : !id || !secret) throw new Error('请填写所选认证方式的完整信息。');
+	await sendJSON('/admin/cf.json', mode === 'url' ? { UsageAPI: url } : mode === 'key' ? { Email: id, GlobalAPIKey: secret } : { AccountID: id, APIToken: secret });
+	await loadIntegrations();
+	return 'Cloudflare 配置已保存。';
+});
+bindAction('clear-cf', async () => {
+	if (!window.confirm('清除 Cloudflare 配置？')) return;
+	await sendJSON('/admin/cf.json', { init: true });
+	await loadIntegrations();
+	return 'Cloudflare 配置已清除。';
+});
+bindAction('save-tg', async () => {
+	const BotToken = find('tg-token').value.trim(), ChatID = find('tg-chat').value.trim();
+	if (BotToken) {
+		if (!ChatID) throw new Error('请同时填写 Chat ID。');
+		await sendJSON('/admin/tg.json', { BotToken, ChatID });
+	} else if (ChatID !== (config.TG?.ChatID ?? '') || (find('tg-toggle').checked && !config.TG?.BotToken)) {
+		throw new Error('请填写 Bot Token 和 Chat ID。');
+	}
+	await sendJSON('/admin/config.json', { ...config, TG: { ...config.TG, 启用: find('tg-toggle').checked } });
+	await loadIntegrations();
+	return 'Telegram 设置已保存。';
+});
+bindAction('clear-tg', async () => {
+	if (!window.confirm('清除 Telegram 凭据并关闭通知？')) return;
+	await sendJSON('/admin/config.json', { ...config, TG: { ...config.TG, 启用: false } });
+	await sendJSON('/admin/tg.json', { init: true });
+	await loadIntegrations();
+	return 'Telegram 凭据已清除。';
+});
+loadIntegrations().catch(error => notice(error.message, true));`,
+		});
+		case 'activity': return 管理布局(view, {
+			markup: 管理标题('运行日志', '查看后台操作和订阅请求记录。', '<button id="reload-activity">刷新日志</button>') + `
+<section class="panel"><label class="field note">筛选日志<input type="search" id="activity-filter" placeholder="类型、IP 或位置"></label>
+<div class="table-wrap"><table class="log-table"><thead><tr><th scope="col">时间</th><th scope="col">事件</th><th scope="col">IP</th><th scope="col">位置</th><th scope="col">详情</th></tr></thead><tbody id="activity-rows"></tbody></table></div>
+<p id="activity-empty" hidden>暂无符合条件的日志。</p></section>
+<dialog id="log-dialog" aria-labelledby="log-title"><h2 id="log-title">日志详情</h2><pre class="mono" id="log-details"></pre>
+<div class="actions"><button id="close-log" autofocus>关闭</button></div></dialog>`,
+			script: 管理工具脚本 + String.raw`
+let entries = [];
+const format = new Intl.DateTimeFormat('zh-CN', { dateStyle: 'short', timeStyle: 'medium' });
+const logDialog = find('log-dialog');
+find('close-log').addEventListener('click', () => logDialog.close());
+function renderActivity() {
+	const term = find('activity-filter').value.trim().toLowerCase();
+	const visible = entries.filter(entry => [entry.TYPE, entry.IP, entry.CC].join(' ').toLowerCase().includes(term));
+	find('activity-rows').replaceChildren(...visible.slice(0, 200).map(entry => {
+		const row = document.createElement('tr'), time = new Date(entry.TIME);
+		for (const text of [Number.isNaN(time.getTime()) ? '—' : format.format(time), entry.TYPE, entry.IP, entry.CC]) row.insertCell().textContent = text || '—';
+		const details = document.createElement('button');
+		details.className = 'quiet';
+		details.textContent = '查看';
+		details.addEventListener('click', () => {
+			find('log-details').textContent = JSON.stringify(entry, null, 2);
+			logDialog.showModal();
+		});
+		row.insertCell().append(details);
+		return row;
+	}));
+	find('activity-empty').hidden = visible.length > 0;
+	find('notice').textContent = visible.length > 200 ? '显示最近 200 条符合条件的日志。' : '共 ' + visible.length + ' 条日志。';
+}
+async function refreshActivity() {
+	const data = await adminFetch('/admin/log.json');
+	entries = Array.isArray(data) ? data.filter(entry => entry && typeof entry === 'object').sort((a,b) => Number(b.TIME) - Number(a.TIME)) : [];
+	renderActivity();
+	return find('notice').textContent;
+}
+bindAction('reload-activity', refreshActivity);
+find('activity-filter').addEventListener('input', renderActivity);
+refreshActivity().catch(error => notice(error.message, true));`,
+		});
+		default: return 管理布局('overview', {
+			markup: `<section class="hero"><h1>管理总览</h1><p id="instance-host">正在读取实例配置…</p>
+<div class="actions"><button class="primary" id="copy-subscription" disabled>复制主订阅</button><a class="button quiet" href="/admin/users">管理用户</a></div></section>
+<p id="notice" class="status-area" role="status"></p><dl class="grid">
+<div class="card"><dt>协议</dt><dd id="overview-protocol">—</dd></div><div class="card"><dt>传输方式</dt><dd id="overview-transport">—</dd></div><div class="card"><dt>Cloudflare 请求量</dt><dd id="overview-usage">—</dd></div></dl>
+<section class="panel"><div class="section-head"><h2>主节点</h2><button id="copy-node" disabled>复制节点地址</button></div><p>将主订阅或节点地址导入客户端。为其他人发放访问权限时，可在「用户管理」创建独立订阅。</p></section>
+<details class="panel"><summary>更多工具</summary><p>打开上游提供的测速、优选和其他独立工具。</p><div class="actions"><a class="button" href="/admin/tools">打开上游工具</a></div></details>`,
+			script: String.raw`
+const transports = { ws: 'WebSocket', grpc: 'gRPC', xhttp: 'XHTTP' };
+adminFetch('/admin/config.json').then(config => {
+	find('instance-host').textContent = config.HOST || location.hostname;
+	find('overview-protocol').textContent = config.协议类型 === 'ss' ? 'Shadowsocks' : (config.协议类型 || '—').toUpperCase();
+	find('overview-transport').textContent = transports[config.传输协议] || config.传输协议 || '—';
+	const usage = config.CF?.Usage;
+	find('overview-usage').textContent = usage?.success && Number.isFinite(usage.total) ? new Intl.NumberFormat('zh-CN').format(usage.total) : '未连接';
+	const token = config.优选订阅生成?.TOKEN;
+	if (token) {
+		const subscription = new URL('/sub', location.origin);
+		subscription.searchParams.set('token', token);
+		find('copy-subscription').disabled = false;
+		find('copy-subscription').addEventListener('click', () => copy(subscription.href));
+	}
+	if (config.LINK) {
+		find('copy-node').disabled = false;
+		find('copy-node').addEventListener('click', () => copy(config.LINK));
+	}
+}).catch(error => { find('instance-host').textContent = location.hostname; notice(error.message, true); });`,
+		});
+	}
+}
+
+function 用户管理页面(method) {
+	if (method !== 'GET') return 用户错误(405, '此方法不可用。');
+	return 管理布局('users', {
+		markup: 管理标题('用户管理', '创建专属订阅，并管理用户有效期。', '<button id="refresh">刷新</button><button class="primary" id="add" disabled>新增用户</button>') + `
+<section class="panel" id="created" hidden><label for="last-link">新用户订阅链接</label><div class="actions"><input id="last-link" readonly><button id="copy-last">复制</button></div></section>
+<section class="panel" aria-labelledby="user-list-title">
+<div class="section-head"><h2 id="user-list-title">订阅用户</h2></div>
+<div class="table-wrap"><table class="users-table">
+<thead><tr><th scope="col">名称</th><th scope="col">到期时间（本机时区）</th><th scope="col">状态</th><th scope="col">操作</th></tr></thead>
+<tbody id="users"></tbody></table></div>
+<p id="empty" hidden>暂无用户。点击「新增用户」发放第一条订阅。</p>
+<div class="paging"><button id="prev" disabled>上一页</button><button id="next" disabled>下一页</button></div>
+</section>
+<dialog id="editor" aria-labelledby="editor-title"><form id="edit-form">
+<h2 id="editor-title">新增用户</h2>
+<label class="field">名称<input id="name" maxlength="80" required autocomplete="off" autofocus></label>
+<label class="field">到期时间（本机时区）<input id="expires" type="datetime-local" step="1" required></label>
+<label class="check"><input type="checkbox" id="enabled">允许使用</label>
+<p id="editor-error" class="danger" role="alert"></p>
+<div class="actions"><button type="button" id="cancel">取消</button><button class="primary" id="save">保存</button></div>
+</form></dialog>
+<dialog id="remove-dialog" aria-labelledby="remove-title"><h2 id="remove-title">删除用户？</h2><p id="remove-message"></p>
+<div class="actions"><button id="cancel-remove" autofocus>取消</button><button class="danger" id="confirm-remove">删除用户</button></div>
+<p id="remove-error" class="danger" role="alert"></p></dialog>`,
+		script: String.raw`
+const editor = find('editor');
+const api = '/admin/users/api';
+const pages = [''];
+let nextCursor = null;
+let editing = null;
+let loading = false;
+
+function request(path = '', method = 'GET', data) {
+	return method === 'GET' ? adminFetch(api + path) : sendJSON(api + path, data, method);
+}
+
+function subscription(user) {
+	const url = new URL('/sub/' + user.id, location.origin);
+	url.searchParams.set('token', user.sub_token);
+	return url.href;
+}
+
+function edit(user) {
+	editing = user;
+	find('editor-title').textContent = user ? '编辑用户' : '新增用户';
+	find('name').value = user?.name ?? '';
+	const expiry = new Date(user?.expires_at ?? Date.now());
+	if (!user) expiry.setDate(expiry.getDate() + 30);
+	const local = new Date(expiry.getTime() - expiry.getTimezoneOffset() * 60000);
+	find('expires').value = local.toISOString().slice(0, 19);
+	find('enabled').checked = user ? Boolean(user.enabled) : true;
+	find('editor-error').textContent = '';
+	editor.showModal();
+}
+
+function action(label, onClick, danger = false) {
+	const button = document.createElement('button');
+	button.textContent = label;
+	button.className = danger ? 'quiet danger' : 'quiet';
+	button.addEventListener('click', onClick);
+	return button;
+}
+
+function render(users) {
+	find('users').replaceChildren(...users.map(user => {
+		const row = document.createElement('tr');
+		row.insertCell().textContent = user.name;
+		row.insertCell().textContent = new Date(user.expires_at).toLocaleString('zh-CN', { hour12: false });
+		const status = row.insertCell();
+		const active = user.enabled && user.expires_at > Date.now();
+		status.textContent = !user.enabled ? '已停用' : active ? '使用中' : '已到期';
+		status.className = active ? 'pill enabled' : 'pill';
+		const actions = document.createElement('div');
+		actions.className = 'actions';
+		actions.append(
+			action('编辑', () => edit(user)),
+			action('复制订阅', () => copy(subscription(user))),
+			action('删除', () => confirmRemoval(user), true)
+		);
+		row.insertCell().append(actions);
+		return row;
+	}));
+	find('empty').hidden = users.length > 0;
+}
+
+const removeDialog = find('remove-dialog');
+let pendingRemoval = null;
+function confirmRemoval(user) {
+	pendingRemoval = user;
+	find('remove-message').textContent = '删除「' + user.name + '」后，订阅链接与节点凭据将失效。';
+	find('remove-error').textContent = '';
+	removeDialog.showModal();
+}
+find('cancel-remove').addEventListener('click', () => removeDialog.close());
+removeDialog.addEventListener('cancel', event => { if (find('confirm-remove').disabled) event.preventDefault(); });
+find('confirm-remove').addEventListener('click', async () => {
+	const button = find('confirm-remove');
+	button.disabled = find('cancel-remove').disabled = true;
+	try {
+		await request('/' + pendingRemoval.id, 'DELETE', { revision: pendingRemoval.revision });
+		removeDialog.close();
+		if (find('last-link').value === subscription(pendingRemoval)) {
+			find('last-link').value = '';
+			find('created').hidden = true;
+		}
+		await load('已删除用户。');
+	} catch (error) {
+		find('remove-error').textContent = error.message;
+	} finally {
+		button.disabled = find('cancel-remove').disabled = false;
+	}
+});
+
+async function load(message = '') {
+	if (loading) return;
+	loading = true;
+	find('prev').disabled = true;
+	find('next').disabled = true;
+	find('users').setAttribute('aria-busy', 'true');
+	if (!message) notice('正在读取用户…');
+	try {
+		let result = await request(pages.at(-1) ? '?after=' + encodeURIComponent(pages.at(-1)) : '');
+		if (!result.users.length && pages.length > 1) {
+			pages.length = 1;
+			result = await request();
+		}
+		nextCursor = result.next;
+		render(result.users);
+		find('add').disabled = false;
+		notice(message);
+	} catch (error) {
+		find('users').replaceChildren();
+		find('empty').hidden = true;
+		find('add').disabled = true;
+		nextCursor = null;
+		notice(error.message, true);
+	} finally {
+		find('prev').disabled = pages.length < 2;
+		find('next').disabled = !nextCursor;
+		find('users').setAttribute('aria-busy', 'false');
+		loading = false;
+	}
+}
+
+find('edit-form').addEventListener('submit', async event => {
+	event.preventDefault();
+	find('save').disabled = true;
+	find('cancel').disabled = true;
+	find('editor-error').textContent = '';
+	try {
+		const expires = new Date(find('expires').value);
+		const data = { name: find('name').value, expires_at: expires.getTime(), enabled: find('enabled').checked };
+		if (editing) {
+			await request('/' + editing.id, 'PUT', { ...data, revision: editing.revision });
+		} else {
+			const { user } = await request('', 'POST', data);
+			find('last-link').value = subscription(user);
+			find('created').hidden = false;
+			pages.length = 1;
+		}
+		const message = editing ? '已保存用户。' : '已新增用户。';
+		editor.close();
+		await load(message);
+	} catch (error) {
+		find('editor-error').textContent = error.message;
+	} finally {
+		find('save').disabled = false;
+		find('cancel').disabled = false;
+	}
+});
+editor.addEventListener('cancel', event => { if (find('save').disabled) event.preventDefault(); });
+find('cancel').addEventListener('click', () => editor.close());
+find('add').addEventListener('click', () => edit(null));
+find('refresh').addEventListener('click', () => load());
+find('copy-last').addEventListener('click', () => copy(find('last-link').value));
+find('prev').addEventListener('click', () => { pages.pop(); load(); });
+find('next').addEventListener('click', () => { pages.push(nextCursor); load(); });
+load();
+`,
+	});
+}
 
 function 获取本机标识(yourUUID) {
 	return [yourUUID.slice(1, 7), '_' + yourUUID.slice(25, 31)];
@@ -4811,8 +5619,8 @@ function 获取传输协议配置(配置 = {}) {
 
 function 获取传输路径参数值(配置 = {}, 节点路径 = '/', 作为优选订阅生成器 = false) {
 	const 路径值 = 作为优选订阅生成器 ? '/' : (配置.随机路径 ? 随机路径(节点路径) : 节点路径);
-	if (配置.传输协议 !== 'grpc') return 路径值;
-	return 路径值.split('?')[0] || '/';
+	const 传输路径 = 配置.传输协议 === 'grpc' ? 路径值.split('?')[0] || '/' : 路径值;
+	return 配置.订阅用户ID ? '/u-' + 配置.订阅用户ID + 传输路径 : 传输路径;
 }
 
 function log(...args) {
@@ -5318,7 +6126,7 @@ async function Singbox订阅配置文件热补丁(SingBox_原始订阅内容, co
 
 function Surge订阅配置文件热补丁(content, url, config_JSON) {
 	const 每行内容 = content.includes('\r\n') ? content.split('\r\n') : content.split('\n');
-	const 完整节点路径 = config_JSON.随机路径 ? 随机路径(config_JSON.完整节点路径) : config_JSON.完整节点路径;
+	const 完整节点路径 = 获取传输路径参数值({ ...config_JSON, 传输协议: 'ws' }, config_JSON.完整节点路径);
 	let 输出内容 = "";
 	for (let x of 每行内容) {
 		if (x.includes('= tro' + 'jan,') && !x.includes('ws=true') && !x.includes('ws-path=')) {
@@ -5596,7 +6404,7 @@ async function DoH查询(域名, 记录类型, DoH解析服务 = "https://cloudf
 	}
 }
 
-async function 读取config_JSON(env, hostname, userID, UA = "Mozilla/5.0", 重置配置 = false) {
+async function 读取config_JSON(env, hostname, userID, UA = "Mozilla/5.0", 重置配置 = false, 默认UUID = userID) {
 	const _p = 特征码字典[0];
 	const xmux默认值 = {
 		maxConnections: 4,
@@ -5610,7 +6418,7 @@ async function 读取config_JSON(env, hostname, userID, UA = "Mozilla/5.0", 重�
 		TIME: new Date().toISOString(),
 		HOST: host,
 		HOSTS: [hostname],
-		UUID: userID,
+		UUID: 默认UUID,
 		PATH: "/",
 		ALPN: "",
 		协议类型: "v" + "le" + "ss",
@@ -5712,8 +6520,9 @@ async function 读取config_JSON(env, hostname, userID, UA = "Mozilla/5.0", 重�
 		}
 	};
 
+	let config_JSON;
 	try {
-		let configJSON = await env.KV.get('config.json');
+		const configJSON = await env.KV.get('config.json');
 		if (!configJSON || 重置配置 == true) {
 			await env.KV.put('config.json', JSON.stringify(默认配置JSON, null, 2));
 			config_JSON = 默认配置JSON;
