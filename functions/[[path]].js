@@ -1,12 +1,16 @@
 // SPDX-License-Identifier: GPL-2.0-only
 import app from '../src/edgetunnel.js';
+import { addAdminMotion } from '../src/admin-motion.js';
 import { autoInitializeUserDatabase } from '../src/user-database.js';
 
+const adminPage = /^\/(?:admin\/?|admin\/users|login)$/i;
 const userAdminApi = /^\/admin\/users\/api(?:\/|$)/i;
 
 export async function onRequest(context) {
 	const { request, env } = context;
-	if (!userAdminApi.test(new URL(request.url).pathname)) return app.fetch(request, env, context);
+	const { pathname } = new URL(request.url);
+	if (adminPage.test(pathname)) return addAdminMotion(await app.fetch(request, env, context));
+	if (!userAdminApi.test(pathname)) return app.fetch(request, env, context);
 
 	if (env.USERS_DB) {
 		return app.fetch(request, { ...env, USERS_DB: autoInitializeUserDatabase(env.USERS_DB) }, context);
